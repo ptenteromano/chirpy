@@ -1,1 +1,10 @@
-{"chirps":{"1":{"id":1,"body":"I had something interesting for breakfast"},"2":{"id":2,"body":"What about second breakfast?"}}}
+{
+  "chirps": {},
+  "users": {
+    "1": {
+      "id": 1,
+      "email": "saul@bettercall.com",
+      "password": "$2a$10$z4fXG5JpLxFXQsfOrQVKe.aF3QL.mi6SToMclfF2dteXxmw1DzODC"
+    }
+  }
+}

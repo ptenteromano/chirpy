@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -9,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 /**
@@ -23,6 +26,15 @@ import (
 const maxChirpLength = 140
 
 func main() {
+	dbg := flag.Bool("debug", false, "Enable debug mode")
+	flag.Parse()
+
+	if *dbg {
+		log.Println("Debug mode enabled")
+		// Remove the database.json file
+		os.Remove("database.json")
+	}
+
 	db := &DB{path: "database.json", mux: &sync.RWMutex{}}
 	db.ensureDB()
 
@@ -44,10 +56,13 @@ func main() {
 	mux.HandleFunc("GET /api/metrics", config.getServerHits)
 	mux.HandleFunc("GET /admin/metrics", config.handlerMetrics)
 	mux.HandleFunc("/api/reset", config.resetServerHits)
+
 	mux.HandleFunc("POST /api/chirps", postChirp(db))
 	mux.HandleFunc("GET /api/chirps/{id}", getChirpById(db))
 	mux.HandleFunc("GET /api/chirps", getChirps(db))
-	// Add endpoint for getitng a single chirp by id
+
+	mux.HandleFunc("POST /api/users", postUser(db))
+	mux.HandleFunc("POST /api/login", postLogin(db))
 
 	fmt.Println("Server running on port 8080")
 	server.ListenAndServe()
@@ -160,12 +175,6 @@ func postChirp(database *DB) http.HandlerFunc {
 			return
 		}
 
-		if err != nil {
-			log.Printf("Error writing chirp to database: %s", err)
-			w.WriteHeader(500)
-			return
-		}
-
 		w.WriteHeader(http.StatusCreated)
 		w.Write(dat)
 	}
@@ -213,8 +222,15 @@ type Chirp struct {
 	Body string `json:"body"`
 }
 
+type User struct {
+	Id       int    `json:"id"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
 type DBStructure struct {
 	Chirps map[string]Chirp `json:"chirps"`
+	Users  map[string]User  `json:"users"`
 }
 
 type DB struct {
@@ -333,5 +349,173 @@ func (db *DB) contentsToStruct() (DBStructure, error) {
 func EmptyDBStructure() DBStructure {
 	return DBStructure{
 		Chirps: map[string]Chirp{},
+		Users:  map[string]User{},
+	}
+}
+
+func postUser(db *DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		type parameters struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+
+		var params parameters
+		err := json.NewDecoder(r.Body).Decode(&params)
+		if err != nil {
+			log.Printf("Error decoding parameters: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		if len(params.Email) == 0 || len(params.Password) == 0 {
+			writeErrMessage(w, "Email is required")
+			return
+		}
+
+		bcryptPassword, err := bcrypt.GenerateFromPassword([]byte(params.Password), bcrypt.DefaultCost)
+
+		if err != nil {
+			log.Printf("Error hashing password: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		user, err := db.WriteUser(params.Email, string(bcryptPassword))
+
+		if err != nil {
+			log.Printf("Error writing user to database: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		// Don't return the password hash
+		resp := struct {
+			Id    int    `json:"id"`
+			Email string `json:"email"`
+		}{
+			Id:    user.Id,
+			Email: user.Email,
+		}
+
+		dat, err := json.Marshal(resp)
+		if err != nil {
+			log.Printf("Error marshalling response: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		w.Write(dat)
+	}
+}
+
+// password should already be hashed
+func (db *DB) WriteUser(email, hashedPassword string) (User, error) {
+	dbStruct, err := db.contentsToStruct()
+
+	if err != nil && err != io.EOF {
+		fmt.Println("here 1:", dbStruct)
+		return User{}, err
+	}
+
+	db.mux.Lock()
+	defer db.mux.Unlock()
+
+	// Open the file in read-write mode
+	file, err := os.OpenFile(db.path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
+
+	if err != nil {
+		return User{}, err
+	}
+
+	defer file.Close()
+
+	for _, user := range dbStruct.Users {
+		if user.Email == email {
+			return User{}, fmt.Errorf("User with email %s already exists", email)
+		}
+	}
+
+	nextId := len(dbStruct.Users) + 1
+	user := User{nextId, email, hashedPassword}
+
+	dbStruct.Users[fmt.Sprintf("%d", nextId)] = user
+
+	// Write the updated JSON to the file
+	updatedData, err := json.Marshal(dbStruct)
+	if err != nil {
+		return User{}, err
+	}
+
+	// Write the new JSON to the file
+	err = os.WriteFile(db.path, updatedData, 0666)
+
+	if err != nil {
+		return User{}, err
+	}
+
+	return user, nil
+}
+
+func postLogin(db *DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		type parameters struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+
+		var params parameters
+		err := json.NewDecoder(r.Body).Decode(&params)
+
+		if err != nil {
+			log.Printf("Error decoding parameters: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		dbStruct, err := db.contentsToStruct()
+
+		if err != nil {
+			log.Printf("Error reading database: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		var userId int
+		for _, user := range dbStruct.Users {
+			if user.Email == params.Email {
+				userId = user.Id
+				break
+			}
+		}
+
+		err = bcrypt.CompareHashAndPassword([]byte(dbStruct.Users[fmt.Sprintf("%d", userId)].Password), []byte(params.Password))
+
+		if err != nil {
+			w.WriteHeader(401)
+			w.Write([]byte("Unauthorized"))
+			return
+		}
+
+		resp := struct {
+			Id    int    `json:"id"`
+			Email string `json:"email"`
+		}{
+			Id:    userId,
+			Email: params.Email,
+		}
+
+		dat, err := json.Marshal(resp)
+		if err != nil {
+			log.Printf("Error marshalling response: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write(dat)
 	}
 }

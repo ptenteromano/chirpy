@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 )
 
 /**
@@ -19,6 +21,8 @@ import (
 const maxChirpLength = 140
 
 func main() {
+	ensureDatabaseFileExists()
+
 	mux := http.NewServeMux()
 	corsMux := middlewareCors(mux)
 
@@ -86,9 +90,9 @@ func handleChirp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respBody := struct {
-		Valid bool `json:"valid"`
+		Cleaned_body string `json:"cleaned_body"`
 	}{
-		Valid: true,
+		Cleaned_body: replaceWordsWithAsterisks(params.Body),
 	}
 
 	dat, err := json.Marshal(respBody)
@@ -120,4 +124,44 @@ func writeErrMessage(w http.ResponseWriter, errMsg string) {
 
 	w.WriteHeader(400)
 	w.Write(dat)
+}
+
+var bannedWords = []string{
+	"kerfuffle",
+	"sharbert",
+	"fornax",
+}
+
+// case - insensitive
+func replaceWordsWithAsterisks(chirp string) string {
+
+	for _, word := range strings.Split(chirp, " ") {
+		for _, bannedWord := range bannedWords {
+			if strings.ToLower(word) == bannedWord {
+				chirp = strings.ReplaceAll(chirp, word, "****")
+			}
+		}
+	}
+	return chirp
+}
+
+func ensureDatabaseFileExists() {
+	// Define the path to the file
+	filePath := "database.json"
+
+	// Attempt to open the file in read-only mode
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		// File does not exist, create it
+		file, err := os.Create(filePath)
+		if err != nil {
+			// Handle potential errors when creating the file
+			log.Fatalf("Failed to create file: %s", err)
+		}
+		defer file.Close()
+
+		log.Println("Created database.json")
+	} else {
+		// File exists
+		log.Println("database.json already exists.")
+	}
 }

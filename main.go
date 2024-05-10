@@ -9,20 +9,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ptenteromano/chirpy/internal/storage"
+	"github.com/ptenteromano/chirpy/internal/config/storage"
 	"golang.org/x/crypto/bcrypt"
 )
 
-/**
- * Routes:
- * /app/ -> Serve the static files in the app directory
- * /api/healthz -> Return a 200 OK
- * /api/metrics -> Return the number of hits to the file server TODO: remove
- * /admin/metrics -> Return html with hits to the file server
- * /reset -> Reset the number of hits to the file server
- */
-
-const maxChirpLength = 140
+const MAX_CHIRP_LENGTH = 140
 
 func main() {
 	dbg := flag.Bool("debug", false, "Enable debug mode")
@@ -153,7 +144,7 @@ func postChirp(database *storage.DB) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 
-		if len(params.Body) > maxChirpLength {
+		if len(params.Body) > MAX_CHIRP_LENGTH {
 			writeErrMessage(w, "Chirp is too long")
 			return
 		}

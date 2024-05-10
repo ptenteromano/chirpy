@@ -4,26 +4,16 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 
+	"github.com/ptenteromano/chirpy/internal/config/storage"
 	"golang.org/x/crypto/bcrypt"
 )
 
-/**
- * Routes:
- * /app/ -> Serve the static files in the app directory
- * /api/healthz -> Return a 200 OK
- * /api/metrics -> Return the number of hits to the file server TODO: remove
- * /admin/metrics -> Return html with hits to the file server
- * /reset -> Reset the number of hits to the file server
- */
-
-const maxChirpLength = 140
+const MAX_CHIRP_LENGTH = 140
 
 func main() {
 	dbg := flag.Bool("debug", false, "Enable debug mode")
@@ -32,11 +22,10 @@ func main() {
 	if *dbg {
 		log.Println("Debug mode enabled")
 		// Remove the database.json file
-		os.Remove("database.json")
+		os.Remove(storage.STORAGE_FILE)
 	}
 
-	db := &DB{path: "database.json", mux: &sync.RWMutex{}}
-	db.ensureDB()
+	db := storage.Connect()
 
 	mux := http.NewServeMux()
 	corsMux := middlewareCors(mux)
@@ -90,14 +79,14 @@ func healthStatus(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
-func getChirpById(database *DB) http.HandlerFunc {
+func getChirpById(database *storage.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("GET /api/chirps/{id}")
 
 		w.Header().Set("Content-Type", "application/json")
 
 		id := r.URL.Path[len("/api/chirps/"):]
-		chirps := database.allChirps()
+		chirps := database.AllChirps()
 
 		for _, chirp := range chirps {
 			if fmt.Sprintf("%d", chirp.Id) == id {
@@ -119,12 +108,12 @@ func getChirpById(database *DB) http.HandlerFunc {
 	}
 }
 
-func getChirps(database *DB) http.HandlerFunc {
+func getChirps(database *storage.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("GET /api/chirps")
 
 		w.Header().Set("Content-Type", "application/json")
-		chirps := database.allChirps()
+		chirps := database.AllChirps()
 
 		dat, err := json.Marshal(chirps)
 		if err != nil {
@@ -138,7 +127,7 @@ func getChirps(database *DB) http.HandlerFunc {
 	}
 }
 
-func postChirp(database *DB) http.HandlerFunc {
+func postChirp(database *storage.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type parameters struct {
 			Body string `json:"body"`
@@ -155,7 +144,7 @@ func postChirp(database *DB) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 
-		if len(params.Body) > maxChirpLength {
+		if len(params.Body) > MAX_CHIRP_LENGTH {
 			writeErrMessage(w, "Chirp is too long")
 			return
 		}
@@ -217,143 +206,7 @@ func replaceWordsWithAsterisks(chirp string) string {
 	return chirp
 }
 
-type Chirp struct {
-	Id   int    `json:"id"`
-	Body string `json:"body"`
-}
-
-type User struct {
-	Id       int    `json:"id"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
-}
-
-type DBStructure struct {
-	Chirps map[string]Chirp `json:"chirps"`
-	Users  map[string]User  `json:"users"`
-}
-
-type DB struct {
-	path string
-	mux  *sync.RWMutex
-}
-
-func (db *DB) ensureDB() {
-	// Attempt to open the file in read-only mode
-	if _, err := os.Stat(db.path); os.IsNotExist(err) {
-		// File does not exist, create it
-		file, err := os.Create(db.path)
-		if err != nil {
-			// Handle potential errors when creating the file
-			log.Fatalf("Failed to create file: %s", err)
-		}
-		defer file.Close()
-
-		log.Println("Created database.json")
-	} else {
-		// File exists
-		log.Println("database.json already exists.")
-	}
-}
-
-func (db *DB) WriteChirp(body string) (Chirp, error) {
-	dbStruct, err := db.contentsToStruct()
-
-	if err != nil && err != io.EOF {
-		fmt.Println("here 1:", dbStruct)
-		return Chirp{}, err
-	}
-
-	db.mux.Lock()
-	defer db.mux.Unlock()
-
-	// Open the file in read-write mode
-	file, err := os.OpenFile(db.path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
-
-	if err != nil {
-		fmt.Println("here 2:", err)
-		return Chirp{}, err
-	}
-
-	defer file.Close()
-
-	nextId := len(dbStruct.Chirps) + 1
-	chirp := Chirp{nextId, body}
-
-	dbStruct.Chirps[fmt.Sprintf("%d", nextId)] = chirp
-
-	fmt.Println("Writing chirp to database:", chirp)
-
-	// Write the updated JSON to the file
-	updatedData, err := json.Marshal(dbStruct)
-	if err != nil {
-		fmt.Println("here 3:", err)
-		return Chirp{}, err
-	}
-
-	// Write the new JSON to the file
-	err = os.WriteFile(db.path, updatedData, 0666)
-
-	if err != nil {
-		fmt.Println("here 4:", err)
-		return Chirp{}, err
-	}
-
-	return chirp, nil
-}
-
-func (db *DB) allChirps() []Chirp {
-	dbStruct, err := db.contentsToStruct()
-
-	if err == io.EOF {
-		return []Chirp{}
-	}
-
-	if err != nil {
-		log.Fatalf("Error reading database: %s", err)
-	}
-
-	var chirps []Chirp
-	for _, chirp := range dbStruct.Chirps {
-		chirps = append(chirps, chirp)
-	}
-
-	return chirps
-}
-
-func (db *DB) contentsToStruct() (DBStructure, error) {
-	// Open the file in read-only mode
-	file, err := os.Open(db.path)
-
-	if err == io.EOF {
-		return EmptyDBStructure(), nil
-	}
-
-	if err != nil {
-		return EmptyDBStructure(), err
-	}
-
-	defer file.Close()
-
-	// Decode the JSON file
-	var dbStruct DBStructure
-	err = json.NewDecoder(file).Decode(&dbStruct)
-
-	if err != nil {
-		return EmptyDBStructure(), err
-	}
-
-	return dbStruct, nil
-}
-
-func EmptyDBStructure() DBStructure {
-	return DBStructure{
-		Chirps: map[string]Chirp{},
-		Users:  map[string]User{},
-	}
-}
-
-func postUser(db *DB) http.HandlerFunc {
+func postUser(db *storage.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type parameters struct {
 			Email    string `json:"email"`
@@ -412,55 +265,7 @@ func postUser(db *DB) http.HandlerFunc {
 	}
 }
 
-// password should already be hashed
-func (db *DB) WriteUser(email, hashedPassword string) (User, error) {
-	dbStruct, err := db.contentsToStruct()
-
-	if err != nil && err != io.EOF {
-		fmt.Println("here 1:", dbStruct)
-		return User{}, err
-	}
-
-	db.mux.Lock()
-	defer db.mux.Unlock()
-
-	// Open the file in read-write mode
-	file, err := os.OpenFile(db.path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
-
-	if err != nil {
-		return User{}, err
-	}
-
-	defer file.Close()
-
-	for _, user := range dbStruct.Users {
-		if user.Email == email {
-			return User{}, fmt.Errorf("User with email %s already exists", email)
-		}
-	}
-
-	nextId := len(dbStruct.Users) + 1
-	user := User{nextId, email, hashedPassword}
-
-	dbStruct.Users[fmt.Sprintf("%d", nextId)] = user
-
-	// Write the updated JSON to the file
-	updatedData, err := json.Marshal(dbStruct)
-	if err != nil {
-		return User{}, err
-	}
-
-	// Write the new JSON to the file
-	err = os.WriteFile(db.path, updatedData, 0666)
-
-	if err != nil {
-		return User{}, err
-	}
-
-	return user, nil
-}
-
-func postLogin(db *DB) http.HandlerFunc {
+func postLogin(db *storage.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type parameters struct {
 			Email    string `json:"email"`
@@ -476,23 +281,8 @@ func postLogin(db *DB) http.HandlerFunc {
 			return
 		}
 
-		dbStruct, err := db.contentsToStruct()
-
-		if err != nil {
-			log.Printf("Error reading database: %s", err)
-			w.WriteHeader(500)
-			return
-		}
-
-		var userId int
-		for _, user := range dbStruct.Users {
-			if user.Email == params.Email {
-				userId = user.Id
-				break
-			}
-		}
-
-		err = bcrypt.CompareHashAndPassword([]byte(dbStruct.Users[fmt.Sprintf("%d", userId)].Password), []byte(params.Password))
+		w.Header().Set("Content-Type", "application/json")
+		userId, err := db.AuthUser(params.Email, params.Password)
 
 		if err != nil {
 			w.WriteHeader(401)

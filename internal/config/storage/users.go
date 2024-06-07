@@ -82,3 +82,45 @@ func (db *DB) AuthUser(email, password string) (int, error) {
 
 	return userId, nil
 }
+
+func (db *DB) UpdateUser(userId int, email, hashedPassword string) (User, error) {
+	dbStruct, err := db.contentsToStruct()
+
+	if err != nil {
+		log.Printf("Error reading database: %s", err)
+		return User{}, err
+	}
+
+	db.mux.Lock()
+	defer db.mux.Unlock()
+
+	userKey := fmt.Sprintf("%d", userId)
+	user, exists := dbStruct.Users[userKey]
+	if !exists {
+		return User{}, fmt.Errorf("User with ID %d does not exist", userId)
+	}
+
+	// Update user fields
+	if email != "" {
+		user.Email = email
+	}
+
+	user.Password = hashedPassword
+
+	dbStruct.Users[userKey] = user
+
+	updatedData, err := json.Marshal(dbStruct)
+	if err != nil {
+		return User{}, err
+	}
+
+	err = os.WriteFile(db.path, updatedData, 0666)
+	if err != nil {
+		return User{}, err
+	}
+
+	return User{
+		Id:    userId,
+		Email: email,
+	}, nil
+}

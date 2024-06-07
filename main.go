@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,7 +61,7 @@ func main() {
 	// Sessions
 	mux.HandleFunc("POST /api/login", postLogin(db, jwtSecret))
 	mux.HandleFunc("POST /api/users", postUser(db))
-	// mux.HandleFunc("PUT /api/users", putUser(db))
+	mux.HandleFunc("PUT /api/users", putUser(db, jwtSecret))
 
 	fmt.Println("Server running on port 8080")
 	server.ListenAndServe()
@@ -291,7 +292,7 @@ func postLogin(db *storage.DB, jwtSecret string) http.HandlerFunc {
 			return
 		}
 
-		if params.ExpiresIn == 0 {
+		if params.ExpiresIn <= 0 || params.ExpiresIn > 86_400 {
 			params.ExpiresIn = 86_400 // 24 hours
 		}
 
@@ -337,6 +338,96 @@ func postLogin(db *storage.DB, jwtSecret string) http.HandlerFunc {
 		}
 
 		dat, err := json.Marshal(resp)
+		if err != nil {
+			log.Printf("Error marshalling response: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write(dat)
+	}
+}
+
+func putUser(db *storage.DB, jwtSecret string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+
+		if authHeader == "" {
+			w.WriteHeader(401)
+			w.Write([]byte("No token provided"))
+			return
+		}
+
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			w.WriteHeader(401)
+			w.Write([]byte("Incorrect authorization format"))
+			return
+		}
+
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+
+		var claims jwt.RegisteredClaims
+		_, err := jwt.ParseWithClaims(token, &claims, func(token *jwt.Token) (interface{}, error) {
+			return []byte(jwtSecret), nil // ????
+		})
+
+		if err != nil {
+			log.Printf("Error parsing token to claim: %s", err)
+			w.WriteHeader(401)
+			w.Write([]byte("Failed to parse token"))
+			return
+		}
+
+		userId, err := strconv.Atoi(claims.Subject)
+
+		if err != nil {
+			log.Printf("Error converting subject to userId: %s", err)
+			w.WriteHeader(500)
+			w.Write([]byte("Failed to parse token"))
+			return
+		}
+
+		type parameters struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+
+		var params parameters
+		err = json.NewDecoder(r.Body).Decode(&params)
+
+		if err != nil {
+			log.Printf("Error decoding parameters: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		bcryptPassword, err := bcrypt.GenerateFromPassword([]byte(params.Password), bcrypt.DefaultCost)
+
+		if err != nil {
+			log.Printf("Error hashing password: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		user, err := db.UpdateUser(userId, params.Email, string(bcryptPassword))
+
+		if err != nil {
+			log.Printf("Error updating user: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		resp := struct {
+			Id    int    `json:"id"`
+			Email string `json:"email"`
+		}{
+			Id:    userId,
+			Email: user.Email,
+		}
+
+		dat, err := json.Marshal(resp)
+
 		if err != nil {
 			log.Printf("Error marshalling response: %s", err)
 			w.WriteHeader(500)

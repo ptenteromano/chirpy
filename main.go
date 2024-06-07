@@ -8,7 +8,10 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/joho/godotenv"
 	"github.com/ptenteromano/chirpy/internal/config/storage"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -32,6 +35,9 @@ func main() {
 
 	config := &apiConfig{}
 
+	godotenv.Load()
+	jwtSecret := os.Getenv("JWT_SECRET")
+
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: corsMux,
@@ -46,12 +52,15 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", config.handlerMetrics)
 	mux.HandleFunc("/api/reset", config.resetServerHits)
 
+	// Chirps
 	mux.HandleFunc("POST /api/chirps", postChirp(db))
 	mux.HandleFunc("GET /api/chirps/{id}", getChirpById(db))
 	mux.HandleFunc("GET /api/chirps", getChirps(db))
 
+	// Sessions
+	mux.HandleFunc("POST /api/login", postLogin(db, jwtSecret))
 	mux.HandleFunc("POST /api/users", postUser(db))
-	mux.HandleFunc("POST /api/login", postLogin(db))
+	// mux.HandleFunc("PUT /api/users", putUser(db))
 
 	fmt.Println("Server running on port 8080")
 	server.ListenAndServe()
@@ -265,11 +274,12 @@ func postUser(db *storage.DB) http.HandlerFunc {
 	}
 }
 
-func postLogin(db *storage.DB) http.HandlerFunc {
+func postLogin(db *storage.DB, jwtSecret string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type parameters struct {
-			Email    string `json:"email"`
-			Password string `json:"password"`
+			Email     string `json:"email"`
+			Password  string `json:"password"`
+			ExpiresIn int    `json:"expires_in_seconds"`
 		}
 
 		var params parameters
@@ -281,6 +291,10 @@ func postLogin(db *storage.DB) http.HandlerFunc {
 			return
 		}
 
+		if params.ExpiresIn == 0 {
+			params.ExpiresIn = 86_400 // 24 hours
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		userId, err := db.AuthUser(params.Email, params.Password)
 
@@ -290,12 +304,36 @@ func postLogin(db *storage.DB) http.HandlerFunc {
 			return
 		}
 
+		issuedAt := time.Now()
+		expiresAt := issuedAt.Add(time.Duration(params.ExpiresIn) * time.Second)
+
+		// Generate token
+		claims := jwt.RegisteredClaims{
+			Issuer:    "chirpy",
+			IssuedAt:  &jwt.NumericDate{Time: issuedAt},
+			ExpiresAt: &jwt.NumericDate{Time: expiresAt},
+			Subject:   fmt.Sprint(userId),
+		}
+		claimedToken := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+		// This signing method expects a []byte
+		token, err := claimedToken.SignedString([]byte(jwtSecret))
+
+		if err != nil {
+			log.Printf("Error with token generation: %s", err)
+			w.WriteHeader(500)
+			w.Write([]byte("Something went wrong with the token generation"))
+			return
+		}
+
 		resp := struct {
 			Id    int    `json:"id"`
 			Email string `json:"email"`
+			Token string `json:"token"`
 		}{
 			Id:    userId,
 			Email: params.Email,
+			Token: token,
 		}
 
 		dat, err := json.Marshal(resp)

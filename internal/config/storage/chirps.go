@@ -27,7 +27,7 @@ func (db *DB) AllChirps() []Chirp {
 	return chirps
 }
 
-func (db *DB) WriteChirp(body string) (Chirp, error) {
+func (db *DB) WriteChirp(userId int, body string) (Chirp, error) {
 	dbStruct, err := db.contentsToStruct()
 
 	if err != nil && err != io.EOF {
@@ -49,7 +49,7 @@ func (db *DB) WriteChirp(body string) (Chirp, error) {
 	defer file.Close()
 
 	nextId := len(dbStruct.Chirps) + 1
-	chirp := Chirp{nextId, body}
+	chirp := Chirp{nextId, body, userId}
 
 	dbStruct.Chirps[fmt.Sprintf("%d", nextId)] = chirp
 

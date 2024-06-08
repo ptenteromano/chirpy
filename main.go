@@ -63,6 +63,9 @@ func main() {
 	mux.HandleFunc("POST /api/users", postUser(db))
 	mux.HandleFunc("PUT /api/users", putUser(db, jwtSecret))
 
+	mux.HandleFunc("POST /api/refresh", postRefresh(db, jwtSecret))
+	mux.HandleFunc("POST /api/revoke", postRevoke(db))
+
 	fmt.Println("Server running on port 8080")
 	server.ListenAndServe()
 }
@@ -305,20 +308,7 @@ func postLogin(db *storage.DB, jwtSecret string) http.HandlerFunc {
 			return
 		}
 
-		issuedAt := time.Now()
-		expiresAt := issuedAt.Add(time.Duration(params.ExpiresIn) * time.Second)
-
-		// Generate token
-		claims := jwt.RegisteredClaims{
-			Issuer:    "chirpy",
-			IssuedAt:  &jwt.NumericDate{Time: issuedAt},
-			ExpiresAt: &jwt.NumericDate{Time: expiresAt},
-			Subject:   fmt.Sprint(userId),
-		}
-		claimedToken := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-
-		// This signing method expects a []byte
-		token, err := claimedToken.SignedString([]byte(jwtSecret))
+		token, err := generateAccessToken(userId, params.ExpiresIn, jwtSecret)
 
 		if err != nil {
 			log.Printf("Error with token generation: %s", err)
@@ -327,14 +317,25 @@ func postLogin(db *storage.DB, jwtSecret string) http.HandlerFunc {
 			return
 		}
 
+		refreshToken, err := db.AddRefreshToken(userId)
+
+		if err != nil {
+			log.Printf("Error with refresh token generation: %s", err)
+			w.WriteHeader(500)
+			w.Write([]byte("Something went wrong with the refresh token generation"))
+			return
+		}
+
 		resp := struct {
-			Id    int    `json:"id"`
-			Email string `json:"email"`
-			Token string `json:"token"`
+			Id           int    `json:"id"`
+			Email        string `json:"email"`
+			Token        string `json:"token"`
+			RefreshToken string `json:"refresh_token"`
 		}{
-			Id:    userId,
-			Email: params.Email,
-			Token: token,
+			Id:           userId,
+			Email:        params.Email,
+			Token:        token,
+			RefreshToken: refreshToken.Value,
 		}
 
 		dat, err := json.Marshal(resp)
@@ -351,40 +352,12 @@ func postLogin(db *storage.DB, jwtSecret string) http.HandlerFunc {
 
 func putUser(db *storage.DB, jwtSecret string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-
-		if authHeader == "" {
-			w.WriteHeader(401)
-			w.Write([]byte("No token provided"))
-			return
-		}
-
-		if !strings.HasPrefix(authHeader, "Bearer ") {
-			w.WriteHeader(401)
-			w.Write([]byte("Incorrect authorization format"))
-			return
-		}
-
-		token := strings.TrimPrefix(authHeader, "Bearer ")
-
-		var claims jwt.RegisteredClaims
-		_, err := jwt.ParseWithClaims(token, &claims, func(token *jwt.Token) (interface{}, error) {
-			return []byte(jwtSecret), nil // ????
-		})
+		userId, err, httpStatus := authUser(r, jwtSecret)
 
 		if err != nil {
-			log.Printf("Error parsing token to claim: %s", err)
-			w.WriteHeader(401)
-			w.Write([]byte("Failed to parse token"))
-			return
-		}
-
-		userId, err := strconv.Atoi(claims.Subject)
-
-		if err != nil {
-			log.Printf("Error converting subject to userId: %s", err)
-			w.WriteHeader(500)
-			w.Write([]byte("Failed to parse token"))
+			log.Printf("Error authenticating user: %s", err)
+			w.WriteHeader(httpStatus)
+			w.Write([]byte("Unauthorized"))
 			return
 		}
 
@@ -437,4 +410,137 @@ func putUser(db *storage.DB, jwtSecret string) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		w.Write(dat)
 	}
+}
+
+func postRefresh(db *storage.DB, jwtSecret string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := grabToken(r)
+
+		if token == "" {
+			w.WriteHeader(401)
+			w.Write([]byte("No token provided"))
+			return
+		}
+
+		userId, err := db.ValidateRefreshToken(token)
+
+		if err != nil {
+			log.Printf("Error reading refresh token response: %s", err)
+			w.WriteHeader(401)
+			w.Write([]byte("Bad refresh token"))
+			return
+		}
+
+		if userId == -1 {
+			log.Printf("Refresh token not valid: %s", err)
+			w.WriteHeader(401)
+			w.Write([]byte("Bad refresh token"))
+			return
+		}
+
+		token, err = generateAccessToken(userId, 3600, jwtSecret)
+
+		if err != nil {
+			log.Printf("Error with token generation: %s", err)
+			w.WriteHeader(500)
+			w.Write([]byte("Something went wrong with the token generation"))
+			return
+		}
+
+		resp := struct {
+			Token string `json:"token"`
+		}{
+			Token: token,
+		}
+
+		dat, err := json.Marshal(resp)
+		if err != nil {
+			log.Printf("Error marshalling response: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write(dat)
+	}
+}
+
+func postRevoke(db *storage.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := grabToken(r)
+
+		if token == "" {
+			w.WriteHeader(401)
+			w.Write([]byte("No token provided"))
+			return
+		}
+
+		err := db.RevokeRefreshToken(token)
+
+		if err != nil {
+			log.Printf("Error revoking token: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func generateAccessToken(userId, expiryInSeconds int, jwtSecret string) (string, error) {
+	issuedAt := time.Now()
+	expiresAt := issuedAt.Add(time.Duration(expiryInSeconds) * time.Second)
+
+	// Generate token
+	claims := jwt.RegisteredClaims{
+		Issuer:    "chirpy",
+		IssuedAt:  &jwt.NumericDate{Time: issuedAt},
+		ExpiresAt: &jwt.NumericDate{Time: expiresAt},
+		Subject:   fmt.Sprint(userId),
+	}
+	claimedToken := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	// This signing method expects a []byte
+	return claimedToken.SignedString([]byte(jwtSecret))
+}
+
+func grabToken(r *http.Request) string {
+	authHeader := r.Header.Get("Authorization")
+
+	if authHeader == "" {
+		return ""
+	}
+
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return ""
+	}
+
+	return strings.TrimPrefix(authHeader, "Bearer ")
+}
+
+// Only for use with access_token
+// @return userId, error, httpStatus
+func authUser(r *http.Request, jwtSecret string) (int, error, int) {
+	token := grabToken(r)
+
+	if token == "" {
+		return -1, fmt.Errorf("invalid authorization header provided"), 401
+	}
+
+	var claims jwt.RegisteredClaims
+	_, err := jwt.ParseWithClaims(token, &claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(jwtSecret), nil
+	})
+
+	if err != nil {
+		return -1, err, 401
+	}
+
+	userId, err := strconv.Atoi(claims.Subject)
+
+	if err != nil {
+		return -1, err, 500
+	}
+
+	return userId, nil, 200
 }

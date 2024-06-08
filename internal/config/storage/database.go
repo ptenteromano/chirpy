@@ -6,11 +6,13 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 )
 
 type DBStructure struct {
-	Chirps map[string]Chirp `json:"chirps"`
-	Users  map[string]User  `json:"users"`
+	Chirps        map[string]Chirp `json:"chirps"`
+	Users         map[string]User  `json:"users"`
+	RefreshTokens map[string]RefreshToken
 }
 
 type Chirp struct {
@@ -24,10 +26,18 @@ type User struct {
 	Password string `json:"password"`
 }
 
+type RefreshToken struct {
+	UserId    int    `json:"user_id"`
+	Value     string `json:"Value"`
+	ExpiresAt time.Time
+	Revoked   bool `json:"Revoked"`
+}
+
 func EmptyDBStructure() DBStructure {
 	return DBStructure{
-		Chirps: map[string]Chirp{},
-		Users:  map[string]User{},
+		Chirps:        map[string]Chirp{},
+		Users:         map[string]User{},
+		RefreshTokens: map[string]RefreshToken{},
 	}
 }
 

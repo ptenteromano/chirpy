@@ -38,6 +38,7 @@ func main() {
 
 	godotenv.Load()
 	jwtSecret := os.Getenv("JWT_SECRET")
+	polkaApiKey := os.Getenv("POLKA_API_KEY")
 
 	server := &http.Server{
 		Addr:    ":8080",
@@ -66,6 +67,9 @@ func main() {
 
 	mux.HandleFunc("POST /api/refresh", postRefresh(db, jwtSecret))
 	mux.HandleFunc("POST /api/revoke", postRevoke(db))
+
+	// Webhooks
+	mux.HandleFunc("POST /api/polka/webhooks", handlePolka(db, polkaApiKey))
 
 	fmt.Println("Server running on port 8080")
 	server.ListenAndServe()
@@ -100,7 +104,7 @@ func getChirpById(database *storage.DB) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 
 		id := r.URL.Path[len("/api/chirps/"):]
-		chirps := database.AllChirps()
+		chirps := database.AllChirps("")
 
 		for _, chirp := range chirps {
 			if fmt.Sprintf("%d", chirp.Id) == id {
@@ -127,7 +131,21 @@ func getChirps(database *storage.DB) http.HandlerFunc {
 		fmt.Println("GET /api/chirps")
 
 		w.Header().Set("Content-Type", "application/json")
-		chirps := database.AllChirps()
+		sortPattern := r.URL.Query().Get("sort")
+
+		var chirps []storage.Chirp
+		if s := r.URL.Query().Get("author_id"); s != "" {
+			authorId, err := strconv.Atoi(s)
+			if err != nil {
+				log.Printf("Error parsing author_id: %s", err)
+				w.WriteHeader(400)
+				return
+			}
+
+			chirps = database.AllChirpsByAuthor(authorId, sortPattern)
+		} else {
+			chirps = database.AllChirps(sortPattern)
+		}
 
 		dat, err := json.Marshal(chirps)
 		if err != nil {
@@ -199,7 +217,7 @@ func deleteChirp(database *storage.DB, jwtSecret string) http.HandlerFunc {
 		if err != nil {
 			log.Printf("Error authenticating user: %s", err)
 			w.WriteHeader(httpStatus)
-		w.Write([]byte("Unauthorized"))
+			w.Write([]byte("Unauthorized"))
 			return
 		}
 
@@ -294,11 +312,13 @@ func postUser(db *storage.DB) http.HandlerFunc {
 
 		// Don't return the password hash
 		resp := struct {
-			Id    int    `json:"id"`
-			Email string `json:"email"`
+			Id          int    `json:"id"`
+			Email       string `json:"email"`
+			IsChirpyRed bool   `json:"is_chirpy_red"`
 		}{
-			Id:    user.Id,
-			Email: user.Email,
+			Id:          user.Id,
+			Email:       user.Email,
+			IsChirpyRed: user.IsChirpyRed,
 		}
 
 		dat, err := json.Marshal(resp)
@@ -335,7 +355,7 @@ func postLogin(db *storage.DB, jwtSecret string) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		userId, err := db.LoginUser(params.Email, params.Password)
+		user, err := db.LoginUser(params.Email, params.Password)
 
 		if err != nil {
 			w.WriteHeader(401)
@@ -343,7 +363,7 @@ func postLogin(db *storage.DB, jwtSecret string) http.HandlerFunc {
 			return
 		}
 
-		token, err := generateAccessToken(userId, params.ExpiresIn, jwtSecret)
+		token, err := generateAccessToken(user.Id, params.ExpiresIn, jwtSecret)
 
 		if err != nil {
 			log.Printf("Error with token generation: %s", err)
@@ -352,7 +372,7 @@ func postLogin(db *storage.DB, jwtSecret string) http.HandlerFunc {
 			return
 		}
 
-		refreshToken, err := db.AddRefreshToken(userId)
+		refreshToken, err := db.AddRefreshToken(user.Id)
 
 		if err != nil {
 			log.Printf("Error with refresh token generation: %s", err)
@@ -364,11 +384,13 @@ func postLogin(db *storage.DB, jwtSecret string) http.HandlerFunc {
 		resp := struct {
 			Id           int    `json:"id"`
 			Email        string `json:"email"`
+			IsChirpyRed  bool   `json:"is_chirpy_red"`
 			Token        string `json:"token"`
 			RefreshToken string `json:"refresh_token"`
 		}{
-			Id:           userId,
-			Email:        params.Email,
+			Id:           user.Id,
+			Email:        user.Email,
+			IsChirpyRed:  user.IsChirpyRed,
 			Token:        token,
 			RefreshToken: refreshToken.Value,
 		}
@@ -553,6 +575,20 @@ func grabToken(r *http.Request) string {
 	return strings.TrimPrefix(authHeader, "Bearer ")
 }
 
+func grabApiKey(r *http.Request) string {
+	authHeader := r.Header.Get("Authorization")
+
+	if authHeader == "" {
+		return ""
+	}
+
+	if !strings.HasPrefix(authHeader, "ApiKey ") {
+		return ""
+	}
+
+	return strings.TrimPrefix(authHeader, "ApiKey ")
+}
+
 // Only for use with access_token
 // @return userId, error, httpStatus
 func authUser(r *http.Request, jwtSecret string) (int, error, int) {
@@ -578,4 +614,57 @@ func authUser(r *http.Request, jwtSecret string) (int, error, int) {
 	}
 
 	return userId, nil, 200
+}
+
+func handlePolka(db *storage.DB, polkaApiKey string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		apiKey := grabApiKey(r)
+
+		if apiKey != polkaApiKey {
+			w.WriteHeader(401)
+			w.Write([]byte("Unauthorized"))
+			return
+		}
+
+		type parameters struct {
+			Event string `json:"event"`
+			Data  struct {
+				UserId int `json:"user_id"`
+			} `json:"data"`
+		}
+
+		var params parameters
+		err := json.NewDecoder(r.Body).Decode(&params)
+
+		if err != nil {
+			log.Printf("Error decoding parameters: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		if params.Event != "user.upgraded" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		// return 404 if user is not found
+		// return 204 after upgrading IsChirpyRed field
+		user, err := db.AddChirpyRed(params.Data.UserId)
+
+		if err != nil {
+			log.Printf("Error upgrading user: %s", err)
+			w.WriteHeader(404)
+			return
+		}
+
+		dat, err := json.Marshal(user)
+		if err != nil {
+			log.Printf("Error marshalling response: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+		w.Write(dat)
+	}
 }

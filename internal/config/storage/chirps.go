@@ -8,7 +8,7 @@ import (
 	"os"
 )
 
-func (db *DB) AllChirps() []Chirp {
+func (db *DB) AllChirps(sortPattern string) []Chirp {
 	db.mux.Lock()
 	defer db.mux.Unlock()
 
@@ -31,7 +31,7 @@ func (db *DB) AllChirps() []Chirp {
 		chirps = append(chirps, chirp)
 	}
 
-	return chirps
+	return sortChirps(chirps, sortPattern)
 }
 
 func (db *DB) WriteChirp(userId int, body string) (Chirp, error) {
@@ -133,4 +133,43 @@ func (db *DB) DeleteChirp(userId int, chirpId string) (int, error) {
 	}
 
 	return 204, nil
+}
+
+func (db *DB) AllChirpsByAuthor(authorId int, sortPattern string) []Chirp {
+	db.mux.Lock()
+	defer db.mux.Unlock()
+
+	dbStruct, err := db.contentsToStruct()
+
+	if err == io.EOF {
+		return []Chirp{}
+	}
+
+	if err != nil {
+		log.Fatalf("Error reading database: %s", err)
+	}
+
+	var chirps []Chirp
+	for _, chirp := range dbStruct.Chirps {
+		if chirp.AuthorId == authorId {
+			chirps = append(chirps, chirp)
+		}
+	}
+
+	return sortChirps(chirps, sortPattern)
+}
+
+func sortChirps(chirps []Chirp, sortPattern string) []Chirp {
+	if sortPattern == "asc" {
+		return chirps
+	}
+
+	if sortPattern == "desc" {
+		for i := 0; i < len(chirps)/2; i++ {
+			j := len(chirps) - i - 1
+			chirps[i], chirps[j] = chirps[j], chirps[i]
+		}
+	}
+
+	return chirps
 }

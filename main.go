@@ -57,6 +57,7 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", postChirp(db, jwtSecret))
 	mux.HandleFunc("GET /api/chirps/{id}", getChirpById(db))
 	mux.HandleFunc("GET /api/chirps", getChirps(db))
+	mux.HandleFunc("DELETE /api/chirps/{chirpId}", deleteChirp(db, jwtSecret))
 
 	// Sessions
 	mux.HandleFunc("POST /api/login", postLogin(db, jwtSecret))
@@ -188,6 +189,31 @@ func postChirp(database *storage.DB, jwtSecret string) http.HandlerFunc {
 
 		w.WriteHeader(http.StatusCreated)
 		w.Write(dat)
+	}
+}
+
+func deleteChirp(database *storage.DB, jwtSecret string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userId, err, httpStatus := authUser(r, jwtSecret)
+
+		if err != nil {
+			log.Printf("Error authenticating user: %s", err)
+			w.WriteHeader(httpStatus)
+		w.Write([]byte("Unauthorized"))
+			return
+		}
+
+		chirpId := r.URL.Path[len("/api/chirps/"):]
+
+		httpStatus, err = database.DeleteChirp(userId, chirpId)
+
+		if err != nil {
+			log.Printf("Error deleting chirp: %s", err)
+			w.WriteHeader(httpStatus)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 

@@ -70,7 +70,7 @@ func (db *DB) WriteUser(email, hashedPassword string) (User, error) {
 	return user, nil
 }
 
-func (db *DB) AuthUser(email, password string) (int, error) {
+func (db *DB) LoginUser(email, password string) (int, error) {
 	dbStruct, err := db.contentsToStruct()
 
 	if err != nil {

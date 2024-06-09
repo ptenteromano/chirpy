@@ -2,7 +2,7 @@
 
 Using Go's http library to serve static files and assets
 
-Run in debug mode:
+To clear the local database and run in debug mode, run the following command:
 
 ```bash
 go build -o out && ./out --debug
@@ -14,3 +14,7 @@ go build -o out && ./out --debug
 - Simple storage using a `dataabse.json` file
 - Users, Chirps
 - `jwt` authentication
+
+
+## TODO:
+- Add sqlite3 database

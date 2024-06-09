@@ -54,9 +54,10 @@ func main() {
 	mux.HandleFunc("/api/reset", config.resetServerHits)
 
 	// Chirps
-	mux.HandleFunc("POST /api/chirps", postChirp(db))
+	mux.HandleFunc("POST /api/chirps", postChirp(db, jwtSecret))
 	mux.HandleFunc("GET /api/chirps/{id}", getChirpById(db))
 	mux.HandleFunc("GET /api/chirps", getChirps(db))
+	mux.HandleFunc("DELETE /api/chirps/{chirpId}", deleteChirp(db, jwtSecret))
 
 	// Sessions
 	mux.HandleFunc("POST /api/login", postLogin(db, jwtSecret))
@@ -140,14 +141,23 @@ func getChirps(database *storage.DB) http.HandlerFunc {
 	}
 }
 
-func postChirp(database *storage.DB) http.HandlerFunc {
+func postChirp(database *storage.DB, jwtSecret string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		userId, err, httpStatus := authUser(r, jwtSecret)
+
+		if err != nil {
+			log.Printf("Error authenticating user: %s", err)
+			w.WriteHeader(httpStatus)
+			w.Write([]byte("Unauthorized"))
+			return
+		}
+
 		type parameters struct {
 			Body string `json:"body"`
 		}
 
 		var params parameters
-		err := json.NewDecoder(r.Body).Decode(&params)
+		err = json.NewDecoder(r.Body).Decode(&params)
 		if err != nil {
 			// http.Error(w, err.Error(), http.StatusBadRequest)
 			log.Printf("Error decoding parameters: %s", err)
@@ -162,7 +172,7 @@ func postChirp(database *storage.DB) http.HandlerFunc {
 			return
 		}
 
-		chirp, err := database.WriteChirp(replaceWordsWithAsterisks(params.Body))
+		chirp, err := database.WriteChirp(userId, replaceWordsWithAsterisks(params.Body))
 
 		if err != nil {
 			log.Printf("Error writing chirp to database: %s", err)
@@ -179,6 +189,31 @@ func postChirp(database *storage.DB) http.HandlerFunc {
 
 		w.WriteHeader(http.StatusCreated)
 		w.Write(dat)
+	}
+}
+
+func deleteChirp(database *storage.DB, jwtSecret string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userId, err, httpStatus := authUser(r, jwtSecret)
+
+		if err != nil {
+			log.Printf("Error authenticating user: %s", err)
+			w.WriteHeader(httpStatus)
+		w.Write([]byte("Unauthorized"))
+			return
+		}
+
+		chirpId := r.URL.Path[len("/api/chirps/"):]
+
+		httpStatus, err = database.DeleteChirp(userId, chirpId)
+
+		if err != nil {
+			log.Printf("Error deleting chirp: %s", err)
+			w.WriteHeader(httpStatus)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -300,7 +335,7 @@ func postLogin(db *storage.DB, jwtSecret string) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		userId, err := db.AuthUser(params.Email, params.Password)
+		userId, err := db.LoginUser(params.Email, params.Password)
 
 		if err != nil {
 			w.WriteHeader(401)

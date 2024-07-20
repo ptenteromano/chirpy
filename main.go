@@ -7,8 +7,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/joho/godotenv"
 	"github.com/ptenteromano/chirpy/internal/config/storage"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -32,6 +36,10 @@ func main() {
 
 	config := &apiConfig{}
 
+	godotenv.Load()
+	jwtSecret := os.Getenv("JWT_SECRET")
+	polkaApiKey := os.Getenv("POLKA_API_KEY")
+
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: corsMux,
@@ -46,12 +54,22 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", config.handlerMetrics)
 	mux.HandleFunc("/api/reset", config.resetServerHits)
 
-	mux.HandleFunc("POST /api/chirps", postChirp(db))
+	// Chirps
+	mux.HandleFunc("POST /api/chirps", postChirp(db, jwtSecret))
 	mux.HandleFunc("GET /api/chirps/{id}", getChirpById(db))
 	mux.HandleFunc("GET /api/chirps", getChirps(db))
+	mux.HandleFunc("DELETE /api/chirps/{chirpId}", deleteChirp(db, jwtSecret))
 
+	// Sessions
+	mux.HandleFunc("POST /api/login", postLogin(db, jwtSecret))
 	mux.HandleFunc("POST /api/users", postUser(db))
-	mux.HandleFunc("POST /api/login", postLogin(db))
+	mux.HandleFunc("PUT /api/users", putUser(db, jwtSecret))
+
+	mux.HandleFunc("POST /api/refresh", postRefresh(db, jwtSecret))
+	mux.HandleFunc("POST /api/revoke", postRevoke(db))
+
+	// Webhooks
+	mux.HandleFunc("POST /api/polka/webhooks", handlePolka(db, polkaApiKey))
 
 	fmt.Println("Server running on port 8080")
 	server.ListenAndServe()
@@ -86,7 +104,7 @@ func getChirpById(database *storage.DB) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 
 		id := r.URL.Path[len("/api/chirps/"):]
-		chirps := database.AllChirps()
+		chirps := database.AllChirps("")
 
 		for _, chirp := range chirps {
 			if fmt.Sprintf("%d", chirp.Id) == id {
@@ -113,7 +131,21 @@ func getChirps(database *storage.DB) http.HandlerFunc {
 		fmt.Println("GET /api/chirps")
 
 		w.Header().Set("Content-Type", "application/json")
-		chirps := database.AllChirps()
+		sortPattern := r.URL.Query().Get("sort")
+
+		var chirps []storage.Chirp
+		if s := r.URL.Query().Get("author_id"); s != "" {
+			authorId, err := strconv.Atoi(s)
+			if err != nil {
+				log.Printf("Error parsing author_id: %s", err)
+				w.WriteHeader(400)
+				return
+			}
+
+			chirps = database.AllChirpsByAuthor(authorId, sortPattern)
+		} else {
+			chirps = database.AllChirps(sortPattern)
+		}
 
 		dat, err := json.Marshal(chirps)
 		if err != nil {
@@ -127,14 +159,23 @@ func getChirps(database *storage.DB) http.HandlerFunc {
 	}
 }
 
-func postChirp(database *storage.DB) http.HandlerFunc {
+func postChirp(database *storage.DB, jwtSecret string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		userId, err, httpStatus := authUser(r, jwtSecret)
+
+		if err != nil {
+			log.Printf("Error authenticating user: %s", err)
+			w.WriteHeader(httpStatus)
+			w.Write([]byte("Unauthorized"))
+			return
+		}
+
 		type parameters struct {
 			Body string `json:"body"`
 		}
 
 		var params parameters
-		err := json.NewDecoder(r.Body).Decode(&params)
+		err = json.NewDecoder(r.Body).Decode(&params)
 		if err != nil {
 			// http.Error(w, err.Error(), http.StatusBadRequest)
 			log.Printf("Error decoding parameters: %s", err)
@@ -149,7 +190,7 @@ func postChirp(database *storage.DB) http.HandlerFunc {
 			return
 		}
 
-		chirp, err := database.WriteChirp(replaceWordsWithAsterisks(params.Body))
+		chirp, err := database.WriteChirp(userId, replaceWordsWithAsterisks(params.Body))
 
 		if err != nil {
 			log.Printf("Error writing chirp to database: %s", err)
@@ -166,6 +207,31 @@ func postChirp(database *storage.DB) http.HandlerFunc {
 
 		w.WriteHeader(http.StatusCreated)
 		w.Write(dat)
+	}
+}
+
+func deleteChirp(database *storage.DB, jwtSecret string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userId, err, httpStatus := authUser(r, jwtSecret)
+
+		if err != nil {
+			log.Printf("Error authenticating user: %s", err)
+			w.WriteHeader(httpStatus)
+			w.Write([]byte("Unauthorized"))
+			return
+		}
+
+		chirpId := r.URL.Path[len("/api/chirps/"):]
+
+		httpStatus, err = database.DeleteChirp(userId, chirpId)
+
+		if err != nil {
+			log.Printf("Error deleting chirp: %s", err)
+			w.WriteHeader(httpStatus)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -246,11 +312,13 @@ func postUser(db *storage.DB) http.HandlerFunc {
 
 		// Don't return the password hash
 		resp := struct {
-			Id    int    `json:"id"`
-			Email string `json:"email"`
+			Id          int    `json:"id"`
+			Email       string `json:"email"`
+			IsChirpyRed bool   `json:"is_chirpy_red"`
 		}{
-			Id:    user.Id,
-			Email: user.Email,
+			Id:          user.Id,
+			Email:       user.Email,
+			IsChirpyRed: user.IsChirpyRed,
 		}
 
 		dat, err := json.Marshal(resp)
@@ -265,11 +333,12 @@ func postUser(db *storage.DB) http.HandlerFunc {
 	}
 }
 
-func postLogin(db *storage.DB) http.HandlerFunc {
+func postLogin(db *storage.DB, jwtSecret string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type parameters struct {
-			Email    string `json:"email"`
-			Password string `json:"password"`
+			Email     string `json:"email"`
+			Password  string `json:"password"`
+			ExpiresIn int    `json:"expires_in_seconds"`
 		}
 
 		var params parameters
@@ -281,8 +350,12 @@ func postLogin(db *storage.DB) http.HandlerFunc {
 			return
 		}
 
+		if params.ExpiresIn <= 0 || params.ExpiresIn > 86_400 {
+			params.ExpiresIn = 86_400 // 24 hours
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		userId, err := db.AuthUser(params.Email, params.Password)
+		user, err := db.LoginUser(params.Email, params.Password)
 
 		if err != nil {
 			w.WriteHeader(401)
@@ -290,12 +363,36 @@ func postLogin(db *storage.DB) http.HandlerFunc {
 			return
 		}
 
+		token, err := generateAccessToken(user.Id, params.ExpiresIn, jwtSecret)
+
+		if err != nil {
+			log.Printf("Error with token generation: %s", err)
+			w.WriteHeader(500)
+			w.Write([]byte("Something went wrong with the token generation"))
+			return
+		}
+
+		refreshToken, err := db.AddRefreshToken(user.Id)
+
+		if err != nil {
+			log.Printf("Error with refresh token generation: %s", err)
+			w.WriteHeader(500)
+			w.Write([]byte("Something went wrong with the refresh token generation"))
+			return
+		}
+
 		resp := struct {
-			Id    int    `json:"id"`
-			Email string `json:"email"`
+			Id           int    `json:"id"`
+			Email        string `json:"email"`
+			IsChirpyRed  bool   `json:"is_chirpy_red"`
+			Token        string `json:"token"`
+			RefreshToken string `json:"refresh_token"`
 		}{
-			Id:    userId,
-			Email: params.Email,
+			Id:           user.Id,
+			Email:        user.Email,
+			IsChirpyRed:  user.IsChirpyRed,
+			Token:        token,
+			RefreshToken: refreshToken.Value,
 		}
 
 		dat, err := json.Marshal(resp)
@@ -306,6 +403,268 @@ func postLogin(db *storage.DB) http.HandlerFunc {
 		}
 
 		w.WriteHeader(http.StatusOK)
+		w.Write(dat)
+	}
+}
+
+func putUser(db *storage.DB, jwtSecret string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userId, err, httpStatus := authUser(r, jwtSecret)
+
+		if err != nil {
+			log.Printf("Error authenticating user: %s", err)
+			w.WriteHeader(httpStatus)
+			w.Write([]byte("Unauthorized"))
+			return
+		}
+
+		type parameters struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+
+		var params parameters
+		err = json.NewDecoder(r.Body).Decode(&params)
+
+		if err != nil {
+			log.Printf("Error decoding parameters: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		bcryptPassword, err := bcrypt.GenerateFromPassword([]byte(params.Password), bcrypt.DefaultCost)
+
+		if err != nil {
+			log.Printf("Error hashing password: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		user, err := db.UpdateUser(userId, params.Email, string(bcryptPassword))
+
+		if err != nil {
+			log.Printf("Error updating user: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		resp := struct {
+			Id    int    `json:"id"`
+			Email string `json:"email"`
+		}{
+			Id:    userId,
+			Email: user.Email,
+		}
+
+		dat, err := json.Marshal(resp)
+
+		if err != nil {
+			log.Printf("Error marshalling response: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write(dat)
+	}
+}
+
+func postRefresh(db *storage.DB, jwtSecret string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := grabToken(r)
+
+		if token == "" {
+			w.WriteHeader(401)
+			w.Write([]byte("No token provided"))
+			return
+		}
+
+		userId, err := db.ValidateRefreshToken(token)
+
+		if err != nil {
+			log.Printf("Error reading refresh token response: %s", err)
+			w.WriteHeader(401)
+			w.Write([]byte("Bad refresh token"))
+			return
+		}
+
+		if userId == -1 {
+			log.Printf("Refresh token not valid: %s", err)
+			w.WriteHeader(401)
+			w.Write([]byte("Bad refresh token"))
+			return
+		}
+
+		token, err = generateAccessToken(userId, 3600, jwtSecret)
+
+		if err != nil {
+			log.Printf("Error with token generation: %s", err)
+			w.WriteHeader(500)
+			w.Write([]byte("Something went wrong with the token generation"))
+			return
+		}
+
+		resp := struct {
+			Token string `json:"token"`
+		}{
+			Token: token,
+		}
+
+		dat, err := json.Marshal(resp)
+		if err != nil {
+			log.Printf("Error marshalling response: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write(dat)
+	}
+}
+
+func postRevoke(db *storage.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := grabToken(r)
+
+		if token == "" {
+			w.WriteHeader(401)
+			w.Write([]byte("No token provided"))
+			return
+		}
+
+		err := db.RevokeRefreshToken(token)
+
+		if err != nil {
+			log.Printf("Error revoking token: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func generateAccessToken(userId, expiryInSeconds int, jwtSecret string) (string, error) {
+	issuedAt := time.Now()
+	expiresAt := issuedAt.Add(time.Duration(expiryInSeconds) * time.Second)
+
+	// Generate token
+	claims := jwt.RegisteredClaims{
+		Issuer:    "chirpy",
+		IssuedAt:  &jwt.NumericDate{Time: issuedAt},
+		ExpiresAt: &jwt.NumericDate{Time: expiresAt},
+		Subject:   fmt.Sprint(userId),
+	}
+	claimedToken := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	// This signing method expects a []byte
+	return claimedToken.SignedString([]byte(jwtSecret))
+}
+
+func grabToken(r *http.Request) string {
+	authHeader := r.Header.Get("Authorization")
+
+	if authHeader == "" {
+		return ""
+	}
+
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return ""
+	}
+
+	return strings.TrimPrefix(authHeader, "Bearer ")
+}
+
+func grabApiKey(r *http.Request) string {
+	authHeader := r.Header.Get("Authorization")
+
+	if authHeader == "" {
+		return ""
+	}
+
+	if !strings.HasPrefix(authHeader, "ApiKey ") {
+		return ""
+	}
+
+	return strings.TrimPrefix(authHeader, "ApiKey ")
+}
+
+// Only for use with access_token
+// @return userId, error, httpStatus
+func authUser(r *http.Request, jwtSecret string) (int, error, int) {
+	token := grabToken(r)
+
+	if token == "" {
+		return -1, fmt.Errorf("invalid authorization header provided"), 401
+	}
+
+	var claims jwt.RegisteredClaims
+	_, err := jwt.ParseWithClaims(token, &claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(jwtSecret), nil
+	})
+
+	if err != nil {
+		return -1, err, 401
+	}
+
+	userId, err := strconv.Atoi(claims.Subject)
+
+	if err != nil {
+		return -1, err, 500
+	}
+
+	return userId, nil, 200
+}
+
+func handlePolka(db *storage.DB, polkaApiKey string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		apiKey := grabApiKey(r)
+
+		if apiKey != polkaApiKey {
+			w.WriteHeader(401)
+			w.Write([]byte("Unauthorized"))
+			return
+		}
+
+		type parameters struct {
+			Event string `json:"event"`
+			Data  struct {
+				UserId int `json:"user_id"`
+			} `json:"data"`
+		}
+
+		var params parameters
+		err := json.NewDecoder(r.Body).Decode(&params)
+
+		if err != nil {
+			log.Printf("Error decoding parameters: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		if params.Event != "user.upgraded" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		// return 404 if user is not found
+		// return 204 after upgrading IsChirpyRed field
+		user, err := db.AddChirpyRed(params.Data.UserId)
+
+		if err != nil {
+			log.Printf("Error upgrading user: %s", err)
+			w.WriteHeader(404)
+			return
+		}
+
+		dat, err := json.Marshal(user)
+		if err != nil {
+			log.Printf("Error marshalling response: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
 		w.Write(dat)
 	}
 }

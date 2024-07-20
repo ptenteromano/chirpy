@@ -6,28 +6,41 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 )
 
 type DBStructure struct {
-	Chirps map[string]Chirp `json:"chirps"`
-	Users  map[string]User  `json:"users"`
+	Chirps        map[string]Chirp        `json:"chirps"`
+	Users         map[string]User         `json:"users"`
+	RefreshTokens map[string]RefreshToken `json:"refresh_tokens"`
 }
 
 type Chirp struct {
-	Id   int    `json:"id"`
-	Body string `json:"body"`
+	Id       int    `json:"id"`
+	Body     string `json:"body"`
+	AuthorId int    `json:"author_id"`
+	Deleted  bool   `json:"deleted"` // not used in bootdev tests
 }
 
 type User struct {
-	Id       int    `json:"id"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Id          int    `json:"id"`
+	Email       string `json:"email"`
+	Password    string `json:"password"`
+	IsChirpyRed bool   `json:"is_chirpy_red"`
+}
+
+type RefreshToken struct {
+	UserId    int       `json:"user_id"`
+	Value     string    `json:"value"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Revoked   bool      `json:"revoked"`
 }
 
 func EmptyDBStructure() DBStructure {
 	return DBStructure{
-		Chirps: map[string]Chirp{},
-		Users:  map[string]User{},
+		Chirps:        map[string]Chirp{},
+		Users:         map[string]User{},
+		RefreshTokens: map[string]RefreshToken{},
 	}
 }
 

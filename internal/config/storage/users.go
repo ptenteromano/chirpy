@@ -47,9 +47,10 @@ func (db *DB) WriteUser(email, hashedPassword string) (User, error) {
 	// }
 
 	user := User{
-		Id:       nextId,
-		Email:    email,
-		Password: hashedPassword,
+		Id:          nextId,
+		Email:       email,
+		Password:    hashedPassword,
+		IsChirpyRed: false,
 	}
 
 	dbStruct.Users[fmt.Sprintf("%d", nextId)] = user
@@ -70,29 +71,29 @@ func (db *DB) WriteUser(email, hashedPassword string) (User, error) {
 	return user, nil
 }
 
-func (db *DB) LoginUser(email, password string) (int, error) {
+func (db *DB) LoginUser(email, password string) (User, error) {
 	dbStruct, err := db.contentsToStruct()
 
 	if err != nil {
 		log.Printf("Error reading database: %s", err)
-		return -1, err
+		return User{}, err
 	}
 
-	var userId int
-	for _, user := range dbStruct.Users {
-		if user.Email == email {
-			userId = user.Id
+	var user User
+	for _, userLookUp := range dbStruct.Users {
+		if userLookUp.Email == email {
+			user = userLookUp
 			break
 		}
 	}
 
-	err = bcrypt.CompareHashAndPassword([]byte(dbStruct.Users[fmt.Sprintf("%d", userId)].Password), []byte(password))
+	err = bcrypt.CompareHashAndPassword([]byte(dbStruct.Users[fmt.Sprintf("%d", user.Id)].Password), []byte(password))
 
 	if err != nil {
-		return -1, err
+		return User{}, err
 	}
 
-	return userId, nil
+	return user, nil
 }
 
 func (db *DB) UpdateUser(userId int, email, hashedPassword string) (User, error) {
@@ -252,4 +253,38 @@ func genRefreshToken() (string, error) {
 	}
 
 	return hex.EncodeToString(randomBytes), nil
+}
+
+func (db *DB) AddChirpyRed(userId int) (User, error) {
+	dbStruct, err := db.contentsToStruct()
+
+	if err != nil {
+		log.Printf("Error reading database: %s", err)
+		return User{}, err
+	}
+
+	db.mux.Lock()
+	defer db.mux.Unlock()
+
+	userKey := fmt.Sprintf("%d", userId)
+	user, exists := dbStruct.Users[userKey]
+	if !exists {
+		return User{}, fmt.Errorf("User with ID %d does not exist", userId)
+	}
+
+	user.IsChirpyRed = true
+
+	dbStruct.Users[userKey] = user
+
+	updatedData, err := json.Marshal(dbStruct)
+	if err != nil {
+		return User{}, err
+	}
+
+	err = os.WriteFile(db.path, updatedData, 0666)
+	if err != nil {
+		return User{}, err
+	}
+
+	return user, nil
 }

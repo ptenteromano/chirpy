@@ -1,8 +1,6 @@
 database.json
 .env
 out
-<<<<<<< Updated upstream
-=======
 chirpy
 .DS_Store
->>>>>>> Stashed changes
+.vscode

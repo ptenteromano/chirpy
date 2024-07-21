@@ -1,6 +1,6 @@
 database.json
 .env
 out
-chirpy
 .DS_Store
 .vscode
+bin/

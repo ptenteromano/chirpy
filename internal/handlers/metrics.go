@@ -1,40 +1,40 @@
-package main
+package handlers
 
 import (
 	"fmt"
 	"net/http"
 )
 
-type apiConfig struct {
-	fileServerHits int
+type ApiConfig struct {
+	FileServerHits int
 }
 
 // An example of middleware that updates the handler it gets passed
-func (c *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
+func (c *ApiConfig) MiddlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c.fileServerHits++
+		c.FileServerHits++
 
 		next.ServeHTTP(w, r)
 	})
 }
 
-func (c *apiConfig) getServerHits(w http.ResponseWriter, r *http.Request) {
+func (c *ApiConfig) GetServerHits(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	hitsToBytes := []byte("Hits: " + fmt.Sprintf("%d", c.fileServerHits))
+	hitsToBytes := []byte("Hits: " + fmt.Sprintf("%d", c.FileServerHits))
 
 	w.Write(hitsToBytes)
 }
 
-func (c *apiConfig) resetServerHits(w http.ResponseWriter, r *http.Request) {
-	c.fileServerHits = 0
+func (c *ApiConfig) ResetServerHits(w http.ResponseWriter, r *http.Request) {
+	c.FileServerHits = 0
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Hits reset"))
 }
 
-func (c *apiConfig) handlerMetrics(w http.ResponseWriter, _ *http.Request) {
+func (c *ApiConfig) HandlerMetrics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Add("Content-Type", "text/html")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(fmt.Sprintf(`
@@ -46,5 +46,5 @@ func (c *apiConfig) handlerMetrics(w http.ResponseWriter, _ *http.Request) {
 </body>
 
 </html>
-	`, c.fileServerHits)))
+	`, c.FileServerHits)))
 }
